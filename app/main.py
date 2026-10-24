@@ -29,7 +29,9 @@ def init_db():
         c.execute('''CREATE TABLE IF NOT EXISTS users (id SERIAL PRIMARY KEY, login VARCHAR(80) UNIQUE NOT NULL, email VARCHAR(255) UNIQUE NOT NULL, password_hash TEXT NOT NULL, created_at TIMESTAMPTZ NOT NULL DEFAULT now());
         CREATE TABLE IF NOT EXISTS semesters (id SERIAL PRIMARY KEY, user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE, name VARCHAR(120) NOT NULL, year VARCHAR(30) NOT NULL, active BOOLEAN NOT NULL DEFAULT false, created_at TIMESTAMPTZ NOT NULL DEFAULT now());
         CREATE TABLE IF NOT EXISTS subjects (id SERIAL PRIMARY KEY, user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE, semester_id INTEGER NOT NULL REFERENCES semesters(id) ON DELETE CASCADE, name VARCHAR(160) NOT NULL, teacher VARCHAR(160) DEFAULT '', color VARCHAR(20) DEFAULT '#d9f99d', grade NUMERIC);
-        CREATE TABLE IF NOT EXISTS events (id SERIAL PRIMARY KEY, user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE, subject_id INTEGER NOT NULL REFERENCES subjects(id) ON DELETE CASCADE, title VARCHAR(180) NOT NULL, event_date DATE NOT NULL, event_type VARCHAR(80) NOT NULL, status VARCHAR(30) NOT NULL DEFAULT 'not_started', description TEXT DEFAULT '');
+        CREATE TABLE IF NOT EXISTS events (id SERIAL PRIMARY KEY, user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE, subject_id INTEGER NOT NULL REFERENCES subjects(id) ON DELETE CASCADE, title VARCHAR(180) NOT NULL, event_date DATE NOT NULL, time_from TIME, time_to TIME, event_type VARCHAR(80) NOT NULL, status VARCHAR(30) NOT NULL DEFAULT 'not_started', description TEXT DEFAULT '');
+        ALTER TABLE events ADD COLUMN IF NOT EXISTS time_from TIME;
+        ALTER TABLE events ADD COLUMN IF NOT EXISTS time_to TIME;
         CREATE TABLE IF NOT EXISTS audit_logs (id BIGSERIAL PRIMARY KEY, user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE, method VARCHAR(10) NOT NULL, path TEXT NOT NULL, status_code INTEGER NOT NULL, created_at TIMESTAMPTZ NOT NULL DEFAULT now());''')
 
 @app.on_event('startup')
@@ -56,7 +58,7 @@ class Credentials(BaseModel):
 class RegisterIn(Credentials): email: str = Field(min_length=5, max_length=255)
 class SemesterIn(BaseModel): name: str = Field(min_length=1); year: str = Field(min_length=1)
 class SubjectIn(BaseModel): semester_id: int; name: str = Field(min_length=1); teacher: str = ''; color: str = '#d9f99d'; grade: float | None = None
-class EventIn(BaseModel): subject_id: int; title: str = Field(min_length=1); event_date: str; event_type: str = 'Zadanie'; status: str = 'not_started'; description: str = ''
+class EventIn(BaseModel): subject_id: int; title: str = Field(min_length=1); event_date: str; time_from: str | None = None; time_to: str | None = None; event_type: str = 'Zadanie'; status: str = 'not_started'; description: str = ''
 
 def current_user(request: Request):
     raw = request.cookies.get('student_planner_session')
@@ -117,10 +119,10 @@ def delete_subject(sid:int,user=Depends(current_user)):
 
 @app.post('/api/events')
 def create_event(p:EventIn,user=Depends(current_user)):
-    with conn() as c: return c.execute('INSERT INTO events(user_id,subject_id,title,event_date,event_type,status,description) SELECT %s,id,%s,%s,%s,%s,%s FROM subjects WHERE id=%s AND user_id=%s RETURNING *',(user['id'],p.title,p.event_date,p.event_type,p.status,p.description,p.subject_id,user['id'])).fetchone()
+    with conn() as c: return c.execute('INSERT INTO events(user_id,subject_id,title,event_date,time_from,time_to,event_type,status,description) SELECT %s,id,%s,%s,%s,%s,%s,%s,%s FROM subjects WHERE id=%s AND user_id=%s RETURNING *',(user['id'],p.title,p.event_date,p.time_from,p.time_to,p.event_type,p.status,p.description,p.subject_id,user['id'])).fetchone()
 @app.put('/api/events/{eid}')
 def update_event(eid:int,p:EventIn,user=Depends(current_user)):
-    with conn() as c: c.execute('UPDATE events SET subject_id=%s,title=%s,event_date=%s,event_type=%s,status=%s,description=%s WHERE id=%s AND user_id=%s',(p.subject_id,p.title,p.event_date,p.event_type,p.status,p.description,eid,user['id'])); return {'ok':True}
+    with conn() as c: c.execute('UPDATE events SET subject_id=%s,title=%s,event_date=%s,time_from=%s,time_to=%s,event_type=%s,status=%s,description=%s WHERE id=%s AND user_id=%s',(p.subject_id,p.title,p.event_date,p.time_from,p.time_to,p.event_type,p.status,p.description,eid,user['id'])); return {'ok':True}
 @app.delete('/api/events/{eid}')
 def delete_event(eid:int,user=Depends(current_user)):
     with conn() as c: c.execute('DELETE FROM events WHERE id=%s AND user_id=%s',(eid,user['id'])); return {'ok':True}
