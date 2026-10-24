@@ -121,10 +121,10 @@ def delete_subject(sid:int,user=Depends(current_user)):
 
 @app.post('/api/events')
 def create_event(p:EventIn,user=Depends(current_user)):
-    with conn() as c: return c.execute('INSERT INTO events(user_id,subject_id,title,event_date,time_from,time_to,event_type,status,description) SELECT %s,id,%s,%s,%s,%s,%s,%s,%s FROM subjects WHERE id=%s AND user_id=%s RETURNING *',(user['id'],p.title,p.event_date,p.time_from,p.time_to,p.event_type,p.status,p.description,p.subject_id,user['id'])).fetchone()
+    with conn() as c: return c.execute('INSERT INTO events(user_id,subject_id,title,event_date,time_from,time_to,event_type,status,description) SELECT %s,id,%s,%s,%s,%s,%s,%s,%s FROM subjects WHERE id=%s AND user_id=%s RETURNING *',(user['id'],p.title,p.event_date,p.time_from or None,p.time_to or None,p.event_type,p.status,p.description,p.subject_id,user['id'])).fetchone()
 @app.put('/api/events/{eid}')
 def update_event(eid:int,p:EventIn,user=Depends(current_user)):
-    with conn() as c: c.execute('UPDATE events SET subject_id=%s,title=%s,event_date=%s,time_from=%s,time_to=%s,event_type=%s,status=%s,description=%s WHERE id=%s AND user_id=%s',(p.subject_id,p.title,p.event_date,p.time_from,p.time_to,p.event_type,p.status,p.description,eid,user['id'])); return {'ok':True}
+    with conn() as c: c.execute('UPDATE events SET subject_id=%s,title=%s,event_date=%s,time_from=%s,time_to=%s,event_type=%s,status=%s,description=%s WHERE id=%s AND user_id=%s',(p.subject_id,p.title,p.event_date,p.time_from or None,p.time_to or None,p.event_type,p.status,p.description,eid,user['id'])); return {'ok':True}
 @app.delete('/api/events/{eid}')
 def delete_event(eid:int,user=Depends(current_user)):
     with conn() as c: c.execute('DELETE FROM events WHERE id=%s AND user_id=%s',(eid,user['id'])); return {'ok':True}
