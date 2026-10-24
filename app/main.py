@@ -30,7 +30,8 @@ def init_db():
         CREATE TABLE IF NOT EXISTS semesters (id SERIAL PRIMARY KEY, user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE, name VARCHAR(120) NOT NULL, year VARCHAR(30) NOT NULL, active BOOLEAN NOT NULL DEFAULT false, created_at TIMESTAMPTZ NOT NULL DEFAULT now());
         CREATE TABLE IF NOT EXISTS subjects (id SERIAL PRIMARY KEY, user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE, semester_id INTEGER NOT NULL REFERENCES semesters(id) ON DELETE CASCADE, name VARCHAR(160) NOT NULL, teacher VARCHAR(160) DEFAULT '', color VARCHAR(20) DEFAULT '#d9f99d', grade NUMERIC);
         CREATE TABLE IF NOT EXISTS events (id SERIAL PRIMARY KEY, user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE, subject_id INTEGER NOT NULL REFERENCES subjects(id) ON DELETE CASCADE, title VARCHAR(180) NOT NULL, event_date DATE, time_from TIME, time_to TIME, event_type VARCHAR(80) NOT NULL, status VARCHAR(30) NOT NULL DEFAULT 'not_started', description TEXT DEFAULT '');
-        ALTER TABLE events ALTER COLUMN event_date DROP NOT NULL;
+        UPDATE events SET event_date=CURRENT_DATE WHERE event_date IS NULL;
+        ALTER TABLE events ALTER COLUMN event_date SET NOT NULL;
         ALTER TABLE events ADD COLUMN IF NOT EXISTS time_from TIME;
         ALTER TABLE events ADD COLUMN IF NOT EXISTS time_to TIME;
         CREATE TABLE IF NOT EXISTS audit_logs (id BIGSERIAL PRIMARY KEY, user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE, method VARCHAR(10) NOT NULL, path TEXT NOT NULL, status_code INTEGER NOT NULL, created_at TIMESTAMPTZ NOT NULL DEFAULT now());''')
@@ -59,7 +60,7 @@ class Credentials(BaseModel):
 class RegisterIn(Credentials): email: str = Field(min_length=5, max_length=255)
 class SemesterIn(BaseModel): name: str = Field(min_length=1); year: str = Field(min_length=1)
 class SubjectIn(BaseModel): semester_id: int; name: str = Field(min_length=1); teacher: str = ''; color: str = '#d9f99d'; grade: float | None = None
-class EventIn(BaseModel): subject_id: int; title: str = Field(min_length=1); event_date: str | None = None; time_from: str | None = None; time_to: str | None = None; event_type: str = 'Zadanie'; status: str = 'not_started'; description: str = ''
+class EventIn(BaseModel): subject_id: int; title: str = Field(min_length=1); event_date: str; time_from: str | None = None; time_to: str | None = None; event_type: str = 'Zadanie'; status: str = 'not_started'; description: str = ''
 
 def current_user(request: Request):
     raw = request.cookies.get('student_planner_session')
