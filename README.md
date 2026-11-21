@@ -19,6 +19,8 @@ docker compose up --build
 
 PostgreSQL działa jako osobny kontener, a dane są przechowywane w wolumenie `postgres_data`. Aplikacja jest dostępna pod `http://localhost:8001`.
 
+W środowisku HTTPS ustaw `COOKIE_SECURE=1` w lokalnym pliku `.env`, aby ciasteczko sesji było wysyłane wyłącznie przez szyfrowane połączenie. Dla lokalnego `http://localhost:8001` pozostaw `COOKIE_SECURE=0`.
+
 ## Tailscale
 
 Konfiguracja sidecara jest w `docker-compose.tailscale.yml`. Po ustawieniu `TS_AUTHKEY` w pliku `.env` uruchom:

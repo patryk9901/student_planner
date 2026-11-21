@@ -1,12 +1,13 @@
+from datetime import date, time as clock_time
 from pathlib import Path
 import hashlib, hmac, os, secrets, time
 import psycopg
 from fastapi import Depends, FastAPI, HTTPException, Request, Response
-from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from itsdangerous import BadSignature, URLSafeTimedSerializer
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator, model_validator
+from typing import Literal
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 DATABASE_URL = os.getenv('DATABASE_URL')
@@ -14,7 +15,8 @@ SESSION_SECRET = os.getenv('SESSION_SECRET')
 if not DATABASE_URL or not SESSION_SECRET: raise RuntimeError('DATABASE_URL and SESSION_SECRET are required')
 signer = URLSafeTimedSerializer(SESSION_SECRET, salt='student-planner-session')
 app = FastAPI(title='Student Planner API')
-app.add_middleware(CORSMiddleware, allow_origins=['*'], allow_credentials=True, allow_methods=['*'], allow_headers=['*'])
+COOKIE_MAX_AGE = 2592000
+COOKIE_SECURE = os.getenv('COOKIE_SECURE', '0').lower() in {'1', 'true', 'yes'}
 
 def conn(): return psycopg.connect(DATABASE_URL, row_factory=psycopg.rows.dict_row)
 def hash_password(password, salt=None):
@@ -55,12 +57,78 @@ async def audit_mutations(request: Request, call_next):
         except Exception: pass
     return response
 
+@app.middleware('http')
+async def security_headers(request: Request, call_next):
+    response = await call_next(request)
+    response.headers['X-Content-Type-Options'] = 'nosniff'
+    response.headers['X-Frame-Options'] = 'DENY'
+    response.headers['Referrer-Policy'] = 'same-origin'
+    response.headers['Permissions-Policy'] = 'camera=(), microphone=(), geolocation=()'
+    return response
+
 class Credentials(BaseModel):
     login: str = Field(min_length=3, max_length=80); password: str = Field(min_length=6, max_length=128)
-class RegisterIn(Credentials): email: str = Field(min_length=5, max_length=255)
-class SemesterIn(BaseModel): name: str = Field(min_length=1); year: str = Field(min_length=1)
-class SubjectIn(BaseModel): semester_id: int; name: str = Field(min_length=1); teacher: str = ''; color: str = '#d9f99d'; grade: float | None = None
-class EventIn(BaseModel): subject_id: int; title: str = Field(min_length=1); event_date: str; time_from: str | None = None; time_to: str | None = None; event_type: str = 'Zadanie'; status: str = 'not_started'; description: str = ''
+    @field_validator('login')
+    @classmethod
+    def validate_login(cls, value):
+        value = value.strip()
+        if not value or not all(ch.isalnum() or ch in '._-' for ch in value):
+            raise ValueError('Login może zawierać tylko litery, cyfry, kropkę, myślnik i podkreślenie')
+        return value
+
+    @field_validator('password')
+    @classmethod
+    def validate_password(cls, value):
+        if not value.strip() or len(value.encode('utf-8')) > 128:
+            raise ValueError('Hasło nie może być puste')
+        return value
+
+class RegisterIn(Credentials):
+    email: str = Field(min_length=5, max_length=255, pattern=r'^[^\s@]+@[^\s@]+\.[^\s@]+$')
+    @field_validator('email')
+    @classmethod
+    def normalize_email(cls, value): return value.strip().lower()
+
+class SemesterIn(BaseModel):
+    name: str = Field(min_length=1, max_length=120)
+    year: str = Field(min_length=1, max_length=30)
+    @field_validator('name', 'year')
+    @classmethod
+    def non_blank(cls, value):
+        value = value.strip()
+        if not value: raise ValueError('Pole nie może być puste')
+        return value
+
+class SubjectIn(BaseModel):
+    semester_id: int
+    name: str = Field(min_length=1, max_length=160)
+    teacher: str = Field(default='', max_length=160)
+    color: str = Field(default='#d9f99d', pattern=r'^#[0-9a-fA-F]{6}$')
+    grade: float | None = Field(default=None, ge=2, le=5)
+    @field_validator('name', 'teacher')
+    @classmethod
+    def clean_text(cls, value): return value.strip()
+
+class EventIn(BaseModel):
+    subject_id: int
+    title: str = Field(min_length=1, max_length=180)
+    event_date: date
+    time_from: clock_time | None = None
+    time_to: clock_time | None = None
+    event_type: Literal['Zadanie', 'Egzamin', 'Kolokwium', 'Projekt', 'Prezentacja', 'Spotkanie'] = 'Zadanie'
+    status: Literal['not_started', 'in_progress', 'done'] = 'not_started'
+    description: str = Field(default='', max_length=2000)
+    @field_validator('title', 'description')
+    @classmethod
+    def clean_event_text(cls, value): return value.strip()
+    @field_validator('time_from', 'time_to', mode='before')
+    @classmethod
+    def empty_time_is_none(cls, value): return None if value in (None, '') else value
+    @model_validator(mode='after')
+    def validate_time_range(self):
+        if self.time_from and self.time_to and self.time_from > self.time_to:
+            raise ValueError('Godzina od nie może być późniejsza niż godzina do')
+        return self
 
 def current_user(request: Request):
     raw = request.cookies.get('student_planner_session')
@@ -76,16 +144,16 @@ def register(p: RegisterIn, response: Response):
     with conn() as c:
         try: row = c.execute('INSERT INTO users(login,email,password_hash) VALUES (%s,%s,%s) RETURNING id,login,email', (p.login.strip(),p.email.strip().lower(),hash_password(p.password))).fetchone()
         except psycopg.errors.UniqueViolation: raise HTTPException(409, 'Login lub email jest już zajęty')
-    response.set_cookie('student_planner_session', signer.dumps({'user_id':row['id']}), httponly=True, samesite='lax', max_age=2592000)
+    response.set_cookie('student_planner_session', signer.dumps({'user_id':row['id']}), httponly=True, secure=COOKIE_SECURE, samesite='lax', max_age=COOKIE_MAX_AGE, path='/')
     return row
 @app.post('/api/auth/login')
 def login(p: Credentials, response: Response):
     with conn() as c: row = c.execute('SELECT id,login,email,password_hash FROM users WHERE login=%s', (p.login.strip(),)).fetchone()
     if not row or not verify_password(p.password,row['password_hash']): raise HTTPException(401,'Nieprawidłowy login lub hasło')
-    response.set_cookie('student_planner_session', signer.dumps({'user_id':row['id']}), httponly=True, samesite='lax', max_age=2592000)
+    response.set_cookie('student_planner_session', signer.dumps({'user_id':row['id']}), httponly=True, secure=COOKIE_SECURE, samesite='lax', max_age=COOKIE_MAX_AGE, path='/')
     return {'id':row['id'],'login':row['login'],'email':row['email']}
 @app.post('/api/auth/logout')
-def logout(response: Response): response.delete_cookie('student_planner_session'); return {'ok':True}
+def logout(response: Response): response.delete_cookie('student_planner_session', path='/'); return {'ok':True}
 @app.get('/api/auth/me')
 def me(user=Depends(current_user)): return user
 
@@ -111,23 +179,39 @@ def delete_semester(sid:int,user=Depends(current_user)):
 
 @app.post('/api/subjects')
 def create_subject(p:SubjectIn,user=Depends(current_user)):
-    with conn() as c: return c.execute('INSERT INTO subjects(user_id,semester_id,name,teacher,color,grade) SELECT %s,id,%s,%s,%s,%s FROM semesters WHERE id=%s AND user_id=%s RETURNING *',(user['id'],p.name,p.teacher,p.color,p.grade,p.semester_id,user['id'])).fetchone()
+    with conn() as c:
+        row = c.execute('INSERT INTO subjects(user_id,semester_id,name,teacher,color,grade) SELECT %s,id,%s,%s,%s,%s FROM semesters WHERE id=%s AND user_id=%s RETURNING *',(user['id'],p.name,p.teacher,p.color,p.grade,p.semester_id,user['id'])).fetchone()
+        if not row: raise HTTPException(404, 'Semestr nie istnieje')
+        return row
 @app.put('/api/subjects/{sid}')
 def update_subject(sid:int,p:SubjectIn,user=Depends(current_user)):
-    with conn() as c: c.execute('UPDATE subjects SET name=%s,teacher=%s,color=%s,grade=%s WHERE id=%s AND user_id=%s',(p.name,p.teacher,p.color,p.grade,sid,user['id'])); return {'ok':True}
+    with conn() as c:
+        result = c.execute('UPDATE subjects SET name=%s,teacher=%s,color=%s,grade=%s WHERE id=%s AND user_id=%s',(p.name,p.teacher,p.color,p.grade,sid,user['id']))
+        if result.rowcount == 0: raise HTTPException(404, 'Przedmiot nie istnieje')
+        return {'ok':True}
 @app.delete('/api/subjects/{sid}')
 def delete_subject(sid:int,user=Depends(current_user)):
     with conn() as c: c.execute('DELETE FROM subjects WHERE id=%s AND user_id=%s',(sid,user['id'])); return {'ok':True}
 
 @app.post('/api/events')
 def create_event(p:EventIn,user=Depends(current_user)):
-    with conn() as c: return c.execute('INSERT INTO events(user_id,subject_id,title,event_date,time_from,time_to,event_type,status,description) SELECT %s,id,%s,%s,%s,%s,%s,%s,%s FROM subjects WHERE id=%s AND user_id=%s RETURNING *',(user['id'],p.title,p.event_date,p.time_from or None,p.time_to or None,p.event_type,p.status,p.description,p.subject_id,user['id'])).fetchone()
+    with conn() as c:
+        row = c.execute('INSERT INTO events(user_id,subject_id,title,event_date,time_from,time_to,event_type,status,description) SELECT %s,id,%s,%s,%s,%s,%s,%s,%s FROM subjects WHERE id=%s AND user_id=%s RETURNING *',(user['id'],p.title,p.event_date,p.time_from,p.time_to,p.event_type,p.status,p.description,p.subject_id,user['id'])).fetchone()
+        if not row: raise HTTPException(404, 'Przedmiot nie istnieje')
+        return row
 @app.put('/api/events/{eid}')
 def update_event(eid:int,p:EventIn,user=Depends(current_user)):
-    with conn() as c: c.execute('UPDATE events SET subject_id=%s,title=%s,event_date=%s,time_from=%s,time_to=%s,event_type=%s,status=%s,description=%s WHERE id=%s AND user_id=%s',(p.subject_id,p.title,p.event_date,p.time_from or None,p.time_to or None,p.event_type,p.status,p.description,eid,user['id'])); return {'ok':True}
+    with conn() as c:
+        result = c.execute('''UPDATE events SET subject_id=%s,title=%s,event_date=%s,time_from=%s,time_to=%s,event_type=%s,status=%s,description=%s
+            WHERE id=%s AND user_id=%s AND EXISTS (SELECT 1 FROM subjects WHERE subjects.id=%s AND subjects.user_id=%s)''',(p.subject_id,p.title,p.event_date,p.time_from,p.time_to,p.event_type,p.status,p.description,eid,user['id'],p.subject_id,user['id']))
+        if result.rowcount == 0: raise HTTPException(404, 'Wydarzenie lub przedmiot nie istnieje')
+        return {'ok':True}
 @app.delete('/api/events/{eid}')
 def delete_event(eid:int,user=Depends(current_user)):
-    with conn() as c: c.execute('DELETE FROM events WHERE id=%s AND user_id=%s',(eid,user['id'])); return {'ok':True}
+    with conn() as c:
+        result = c.execute('DELETE FROM events WHERE id=%s AND user_id=%s',(eid,user['id']))
+        if result.rowcount == 0: raise HTTPException(404, 'Wydarzenie nie istnieje')
+        return {'ok':True}
 
 app.mount('/static', StaticFiles(directory=BASE_DIR/'static'), name='static')
 @app.get('/')
